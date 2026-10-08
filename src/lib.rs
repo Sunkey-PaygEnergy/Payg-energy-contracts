@@ -5,9 +5,11 @@ pub mod events;
 pub mod storage;
 pub mod types;
 
-use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, BytesN, Env, String, Vec};
 pub use errors::Error;
 pub use types::*;
+
+pub const MAX_BATCH_SIZE: u32 = 50;
 
 #[contract]
 pub struct SunkeyPaygContract;
@@ -358,7 +360,6 @@ impl SunkeyPaygContract {
         let mut total_paid: i128 = 0;
 
         if plan.deposit_amount > 0 {
-            // Customer authorizes deposit
             customer.require_auth();
             let (op_share, pool_share) = Self::internal_split_and_transfer(
                 &e,
@@ -424,6 +425,73 @@ impl SunkeyPaygContract {
         }
 
         Ok(())
+    }
+
+    pub fn batch_create_leases(
+        e: Env,
+        operator: Address,
+        leases: Vec<BatchLeaseInput>,
+    ) -> Result<u32, Error> {
+        operator.require_auth();
+
+        if leases.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchSizeExceeded);
+        }
+
+        let mut op = storage::get_operator(&e, &operator).ok_or(Error::OperatorNotFound)?;
+        if !op.active {
+            return Err(Error::OperatorInactive);
+        }
+
+        let current_time = e.ledger().timestamp();
+        let mut count: u32 = 0;
+
+        for item in leases.iter() {
+            let plan = storage::get_plan(&e, item.plan_id).ok_or(Error::PlanNotFound)?;
+            if !plan.active || plan.operator != operator {
+                return Err(Error::PlanInactive);
+            }
+
+            if storage::get_lease(&e, item.lease_id).is_some() {
+                return Err(Error::LeaseAlreadyExists);
+            }
+
+            if storage::get_device_lease(&e, &item.device_id).is_some() {
+                return Err(Error::DeviceAlreadyAssigned);
+            }
+
+            if let Some(pid) = item.pool_id {
+                let pool = storage::get_pool(&e, pid).ok_or(Error::PoolNotFound)?;
+                if pool.operator != operator {
+                    return Err(Error::Unauthorized);
+                }
+            }
+
+            let lease = Lease {
+                lease_id: item.lease_id,
+                operator: operator.clone(),
+                customer: item.customer.clone(),
+                plan_id: item.plan_id,
+                device_id: item.device_id.clone(),
+                pool_id: item.pool_id,
+                status: LeaseStatus::Active,
+                paid_until: current_time,
+                total_paid: 0,
+                emergency_paused_until: 0,
+                created_at: current_time,
+                last_payment_at: current_time,
+            };
+
+            storage::set_lease(&e, &lease);
+            storage::set_device_lease(&e, &item.device_id, item.lease_id);
+            events::emit_lease_created(&e, item.lease_id, item.customer, operator.clone(), item.device_id, item.pool_id);
+            count += 1;
+        }
+
+        op.total_leases += count as u64;
+        storage::set_operator(&e, &op);
+
+        Ok(count)
     }
 
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
