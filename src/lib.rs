@@ -646,6 +646,65 @@ impl SunkeyPaygContract {
         Ok(lease.paid_until)
     }
 
+    pub fn request_plan_change(
+        e: Env,
+        operator: Address,
+        lease_id: u64,
+        new_plan_id: u32,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        if lease.operator != operator {
+            return Err(Error::Unauthorized);
+        }
+        if lease.status == LeaseStatus::Owned {
+            return Err(Error::LeaseAlreadyOwned);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+        if lease.plan_id == new_plan_id {
+            return Err(Error::InvalidPlanParams);
+        }
+
+        let new_plan = storage::get_plan(&e, new_plan_id).ok_or(Error::PlanNotFound)?;
+        if !new_plan.active || new_plan.operator != operator {
+            return Err(Error::PlanInactive);
+        }
+
+        storage::set_pending_plan_change(&e, lease_id, new_plan_id);
+        events::emit_plan_change_requested(&e, lease_id, lease.plan_id, new_plan_id);
+        Ok(())
+    }
+
+    pub fn accept_plan_change(e: Env, customer: Address, lease_id: u64) -> Result<(), Error> {
+        customer.require_auth();
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        if lease.customer != customer {
+            return Err(Error::Unauthorized);
+        }
+
+        let new_plan_id = storage::get_pending_plan_change(&e, lease_id).ok_or(Error::NoPendingPlanChange)?;
+        let new_plan = storage::get_plan(&e, new_plan_id).ok_or(Error::PlanNotFound)?;
+        if !new_plan.active {
+            return Err(Error::PlanInactive);
+        }
+
+        let old_plan = lease.plan_id;
+        lease.plan_id = new_plan_id;
+        storage::set_lease(&e, &lease);
+        storage::clear_pending_plan_change(&e, lease_id);
+
+        events::emit_plan_change_accepted(&e, lease_id, old_plan, new_plan_id);
+        Ok(())
+    }
+
+    pub fn get_pending_plan_change(e: Env, lease_id: u64) -> Result<u32, Error> {
+        storage::get_pending_plan_change(&e, lease_id).ok_or(Error::NoPendingPlanChange)
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
