@@ -970,6 +970,14 @@ impl SunkeyPaygContract {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
 
+    pub fn get_device_lease(e: Env, device_id: BytesN<32>) -> Result<u64, Error> {
+        storage::get_device_lease(&e, &device_id).ok_or(Error::LeaseNotFound)
+    }
+
+    pub fn is_device_assigned(e: Env, device_id: BytesN<32>) -> bool {
+        storage::get_device_lease(&e, &device_id).is_some()
+    }
+
     pub fn version(_e: Env) -> u32 {
         1
     }
