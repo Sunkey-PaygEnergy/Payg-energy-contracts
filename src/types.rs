@@ -1,5 +1,9 @@
 use soroban_sdk::{contracttype, Address, BytesN, String};
 
+pub const ACC_PRECISION: i128 = 1_000_000_000_000; // 1e12 for accumulator precision
+pub const BPS_DENOMINATOR: u32 = 10_000;
+pub const SECONDS_PER_DAY: u64 = 86_400;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
@@ -73,4 +77,30 @@ pub struct Lease {
     pub emergency_paused_until: u64,
     pub created_at: u64,
     pub last_payment_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinancierPool {
+    pub pool_id: u64,
+    pub operator: Address,
+    pub token: Address,
+    pub name: String,
+    pub target_amount: i128,
+    pub funded_amount: i128,
+    pub repayment_bps: u32,
+    pub total_repaid: i128,
+    pub acc_reward_per_share: i128,
+    pub is_closed: bool,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolFinancier {
+    pub pool_id: u64,
+    pub financier: Address,
+    pub deposit_amount: i128,
+    pub reward_debt: i128,
+    pub claimed_amount: i128,
 }
