@@ -505,6 +505,14 @@ impl SunkeyPaygContract {
         Ok(count)
     }
 
+    pub fn calculate_access_seconds(amount: i128, daily_rate: i128) -> u64 {
+        if daily_rate <= 0 || amount <= 0 {
+            return 0;
+        }
+        let total_seconds_scaled = amount.saturating_mul(SECONDS_PER_DAY as i128);
+        (total_seconds_scaled / daily_rate) as u64
+    }
+
     pub fn pay(e: Env, payer: Address, lease_id: u64, amount: i128) -> Result<i128, Error> {
         payer.require_auth();
 
@@ -531,7 +539,6 @@ impl SunkeyPaygContract {
             return Err(Error::LeaseAlreadyOwned);
         }
 
-        // Overpayment capping: charge at most remaining_to_own
         let actual_payment = if amount > remaining_to_own {
             remaining_to_own
         } else {
@@ -561,7 +568,7 @@ impl SunkeyPaygContract {
         storage::set_operator(&e, &op);
 
         let current_time = e.ledger().timestamp();
-        let seconds_added = ((actual_payment * (SECONDS_PER_DAY as i128)) / plan.daily_rate) as u64;
+        let seconds_added = Self::calculate_access_seconds(actual_payment, plan.daily_rate);
 
         let base_time = if lease.paid_until > current_time {
             lease.paid_until
@@ -569,13 +576,15 @@ impl SunkeyPaygContract {
             current_time
         };
 
-        lease.paid_until = base_time + seconds_added;
         lease.total_paid += actual_payment;
         lease.last_payment_at = current_time;
 
         let is_owned = lease.total_paid >= plan.total_price;
         if is_owned {
             lease.status = LeaseStatus::Owned;
+            lease.paid_until = u64::MAX;
+        } else {
+            lease.paid_until = base_time + seconds_added;
         }
 
         storage::set_lease(&e, &lease);
