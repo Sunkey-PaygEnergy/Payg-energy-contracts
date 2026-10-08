@@ -737,6 +737,30 @@ impl SunkeyPaygContract {
         Ok(())
     }
 
+    pub fn transfer_lease_customer(
+        e: Env,
+        current_customer: Address,
+        new_customer: Address,
+        lease_id: u64,
+    ) -> Result<(), Error> {
+        current_customer.require_auth();
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        if lease.customer != current_customer {
+            return Err(Error::Unauthorized);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+
+        let old_customer = lease.customer.clone();
+        lease.customer = new_customer.clone();
+        storage::set_lease(&e, &lease);
+
+        events::emit_lease_transferred(&e, lease_id, old_customer, new_customer);
+        Ok(())
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
