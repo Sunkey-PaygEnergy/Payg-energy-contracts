@@ -1,6 +1,9 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, Env, Address};
+pub mod errors;
+
+use soroban_sdk::{contract, contractimpl, Env};
+pub use errors::Error;
 
 #[contract]
 pub struct SunkeyPaygContract;

@@ -1,0 +1,42 @@
+use soroban_sdk::contracterror;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    AlreadyInitialized = 1,
+    NotInitialized = 2,
+    Unauthorized = 3,
+    OperatorNotFound = 4,
+    OperatorAlreadyExists = 5,
+    OperatorInactive = 6,
+    PlanNotFound = 7,
+    PlanAlreadyExists = 8,
+    PlanInactive = 9,
+    LeaseNotFound = 10,
+    LeaseAlreadyExists = 11,
+    LeaseNotActive = 12,
+    LeaseAlreadyOwned = 13,
+    LeaseSuspended = 14,
+    LeaseRepossessed = 15,
+    InvalidAmount = 16,
+    BelowMinimumPayment = 17,
+    OverpaymentExceedsBalance = 18,
+    RepossessionNotAllowed = 19,
+    GracePeriodActive = 20,
+    PoolNotFound = 21,
+    PoolAlreadyExists = 22,
+    PoolFullyFunded = 23,
+    PoolFundingTargetExceeded = 24,
+    NoEarningsToClaim = 25,
+    DeviceAlreadyAssigned = 26,
+    InvalidPlanParams = 27,
+    InvalidBasisPoints = 28,
+    PlanChangePending = 29,
+    NoPendingPlanChange = 30,
+    PlanChangeMismatch = 31,
+    BatchSizeExceeded = 32,
+    ArithmeticOverflow = 33,
+    ZeroAddress = 34,
+    PauseDurationInvalid = 35,
+}
