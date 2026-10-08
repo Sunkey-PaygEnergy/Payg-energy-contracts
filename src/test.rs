@@ -3,8 +3,17 @@
 use super::*;
 use soroban_sdk::{
     testutils::Address as _,
-    Address, Env, String,
+    token::{Client as TokenClient, StellarAssetClient},
+    Address, BytesN, Env, String, Vec,
 };
+
+fn create_token<'a>(e: &Env, admin: &Address) -> (Address, TokenClient<'a>, StellarAssetClient<'a>) {
+    let sac = e.register_stellar_asset_contract_v2(admin.clone());
+    let token = sac.address();
+    let token_client = TokenClient::new(e, &token);
+    let asset_client = StellarAssetClient::new(e, &token);
+    (token, token_client, asset_client)
+}
 
 fn setup_env() -> (Env, SunkeyPaygContractClient<'static>, Address) {
     let e = Env::default();
@@ -233,4 +242,129 @@ fn test_batch_lease_creation() {
         let l = client.get_lease(&(2000 + i as u64));
         assert_eq!(l.status, LeaseStatus::Active);
     }
+}
+
+#[test]
+fn test_payments_and_overpayment_capping() {
+    let (e, client, admin) = setup_env();
+
+    let (token, _token_client, asset_client) = create_token(&e, &admin);
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let plan_id = 10;
+    // Daily rate = 5 token, total = 20 token, deposit = 5 token, min_payment = 2 token
+    let daily_rate = 5_000_000;
+    let total_price = 20_000_000;
+    let deposit_amount = 5_000_000;
+    let min_payment = 2_000_000;
+
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Tier 1 Solar"),
+        &token,
+        &daily_rate,
+        &total_price,
+        &deposit_amount,
+        &min_payment,
+        &86_400,
+    );
+
+    let customer = Address::generate(&e);
+    let relative = Address::generate(&e);
+
+    // Mint tokens
+    asset_client.mint(&customer, &100_000_000);
+    asset_client.mint(&relative, &100_000_000);
+
+    let lease_id = 999;
+    let device_id = BytesN::from_array(&e, &[7u8; 32]);
+
+    // Create lease with 5 token deposit -> buys 1 day (86400s)
+    client.create_lease(&operator, &lease_id, &customer, &plan_id, &device_id, &None);
+
+    let lease_after_dep = client.get_lease(&lease_id);
+    assert_eq!(lease_after_dep.total_paid, deposit_amount);
+    let access1 = client.get_access(&lease_id);
+    assert_eq!(access1.state, AccessState::Active);
+    assert!(access1.seconds_remaining >= 86_399);
+
+    // Relative makes top-up of 5 token (buys another day)
+    let paid_relative = client.pay(&relative, &lease_id, &5_000_000);
+    assert_eq!(paid_relative, 5_000_000);
+
+    let lease_after_rel = client.get_lease(&lease_id);
+    assert_eq!(lease_after_rel.total_paid, 10_000_000);
+
+    // Overpayment capping test:
+    // Total price is 20_000_000. Customer has paid 10_000_000.
+    // Remaining to own is exactly 10_000_000.
+    // Customer attempts to pay 15_000_000 (exceeds balance by 5_000_000).
+    let paid_capped = client.pay(&customer, &lease_id, &15_000_000);
+
+    // Only 10_000_000 should be charged!
+    assert_eq!(paid_capped, 10_000_000);
+
+    let lease_final = client.get_lease(&lease_id);
+    assert_eq!(lease_final.total_paid, total_price);
+    assert_eq!(lease_final.status, LeaseStatus::Owned);
+    assert_eq!(lease_final.paid_until, u64::MAX);
+
+    let access_final = client.get_access(&lease_id);
+    assert_eq!(access_final.state, AccessState::Owned);
+    assert!(access_final.is_unlocked);
+    assert_eq!(access_final.remaining_to_own, 0);
+
+    // Attempting further payment should fail
+    let res_after_owned = client.try_pay(&customer, &lease_id, &5_000_000);
+    assert_eq!(res_after_owned.unwrap_err().unwrap(), Error::LeaseAlreadyOwned);
+}
+
+#[test]
+fn test_grant_credit() {
+    let (e, client, _admin) = setup_env();
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let token = Address::generate(&e);
+    let plan_id = 11;
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Promo Plan"),
+        &token,
+        &2_000_000,
+        &100_000_000,
+        &0,
+        &1_000_000,
+        &86_400,
+    );
+
+    let customer = Address::generate(&e);
+    let device_id = BytesN::from_array(&e, &[8u8; 32]);
+    let lease_id = 888;
+    client.create_lease(&operator, &lease_id, &customer, &plan_id, &device_id, &None);
+
+    let current_time = e.ledger().timestamp();
+
+    // Grant 3 promotional days of energy
+    let new_paid_until = client.grant_credit(
+        &operator,
+        &lease_id,
+        &3,
+        &String::from_str(&e, "Welcome promotion"),
+    );
+
+    assert_eq!(new_paid_until, current_time + (3 * SECONDS_PER_DAY));
+    let lease = client.get_lease(&lease_id);
+    assert_eq!(lease.paid_until, new_paid_until);
+
+    let access = client.get_access(&lease_id);
+    assert_eq!(access.state, AccessState::Active);
+    assert!(access.is_unlocked);
 }
