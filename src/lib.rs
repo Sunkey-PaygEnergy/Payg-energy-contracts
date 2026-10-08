@@ -761,6 +761,46 @@ impl SunkeyPaygContract {
         Ok(())
     }
 
+    pub fn emergency_pause(
+        e: Env,
+        operator: Address,
+        lease_id: u64,
+        pause_duration_seconds: u64,
+        reason: String,
+    ) -> Result<u64, Error> {
+        operator.require_auth();
+
+        if pause_duration_seconds == 0 {
+            return Err(Error::PauseDurationInvalid);
+        }
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        if lease.operator != operator {
+            return Err(Error::Unauthorized);
+        }
+        if lease.status == LeaseStatus::Owned {
+            return Err(Error::LeaseAlreadyOwned);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+
+        let current_time = e.ledger().timestamp();
+        // If lease was active/within access, shift expiration forward by pause duration
+        if lease.paid_until > current_time {
+            lease.paid_until += pause_duration_seconds;
+        } else {
+            // If already expired, grant grace relief during the crisis
+            lease.paid_until = current_time + pause_duration_seconds;
+        }
+
+        lease.emergency_paused_until = current_time + pause_duration_seconds;
+        storage::set_lease(&e, &lease);
+
+        events::emit_emergency_pause(&e, lease_id, operator, lease.emergency_paused_until, reason);
+        Ok(lease.emergency_paused_until)
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
