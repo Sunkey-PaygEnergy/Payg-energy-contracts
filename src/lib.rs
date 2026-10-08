@@ -801,6 +801,37 @@ impl SunkeyPaygContract {
         Ok(lease.emergency_paused_until)
     }
 
+    pub fn set_suspended(
+        e: Env,
+        operator: Address,
+        lease_id: u64,
+        suspended: bool,
+        reason: String,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        if lease.operator != operator {
+            return Err(Error::Unauthorized);
+        }
+        if lease.status == LeaseStatus::Owned {
+            return Err(Error::LeaseAlreadyOwned);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+
+        lease.status = if suspended {
+            LeaseStatus::Suspended
+        } else {
+            LeaseStatus::Active
+        };
+
+        storage::set_lease(&e, &lease);
+        events::emit_suspended(&e, lease_id, operator, suspended, reason);
+        Ok(())
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
