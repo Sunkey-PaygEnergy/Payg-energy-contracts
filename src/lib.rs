@@ -607,6 +607,45 @@ impl SunkeyPaygContract {
         Ok(actual_payment)
     }
 
+    pub fn grant_credit(
+        e: Env,
+        operator: Address,
+        lease_id: u64,
+        days: u32,
+        reason: String,
+    ) -> Result<u64, Error> {
+        operator.require_auth();
+
+        if days == 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        if lease.operator != operator {
+            return Err(Error::Unauthorized);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+        if lease.status == LeaseStatus::Owned {
+            return Err(Error::LeaseAlreadyOwned);
+        }
+
+        let current_time = e.ledger().timestamp();
+        let seconds_added = (days as u64) * SECONDS_PER_DAY;
+        let base_time = if lease.paid_until > current_time {
+            lease.paid_until
+        } else {
+            current_time
+        };
+
+        lease.paid_until = base_time + seconds_added;
+        storage::set_lease(&e, &lease);
+
+        events::emit_credit_granted(&e, lease_id, operator, days, lease.paid_until, reason);
+        Ok(lease.paid_until)
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
