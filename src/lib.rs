@@ -5,7 +5,7 @@ pub mod events;
 pub mod storage;
 pub mod types;
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, Env, String};
 pub use errors::Error;
 pub use types::*;
 
@@ -148,6 +148,113 @@ impl SunkeyPaygContract {
 
     pub fn get_plan(e: Env, plan_id: u32) -> Result<Plan, Error> {
         storage::get_plan(&e, plan_id).ok_or(Error::PlanNotFound)
+    }
+
+    pub fn create_pool(
+        e: Env,
+        operator: Address,
+        pool_id: u64,
+        token: Address,
+        name: String,
+        target_amount: i128,
+        repayment_bps: u32,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let op = storage::get_operator(&e, &operator).ok_or(Error::OperatorNotFound)?;
+        if !op.active {
+            return Err(Error::OperatorInactive);
+        }
+
+        if target_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if repayment_bps == 0 || repayment_bps > BPS_DENOMINATOR {
+            return Err(Error::InvalidBasisPoints);
+        }
+        if storage::get_pool(&e, pool_id).is_some() {
+            return Err(Error::PoolAlreadyExists);
+        }
+
+        let pool = FinancierPool {
+            pool_id,
+            operator,
+            token,
+            name,
+            target_amount,
+            funded_amount: 0,
+            repayment_bps,
+            total_repaid: 0,
+            acc_reward_per_share: 0,
+            is_closed: false,
+            created_at: e.ledger().timestamp(),
+        };
+
+        storage::set_pool(&e, &pool);
+        events::emit_pool_created(&e, pool_id, pool.operator, target_amount, repayment_bps);
+        Ok(())
+    }
+
+    pub fn fund_pool(e: Env, financier: Address, pool_id: u64, amount: i128) -> Result<(), Error> {
+        financier.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let mut pool = storage::get_pool(&e, pool_id).ok_or(Error::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(Error::PoolFullyFunded);
+        }
+        if pool.funded_amount + amount > pool.target_amount {
+            return Err(Error::PoolFundingTargetExceeded);
+        }
+
+        let op = storage::get_operator(&e, &pool.operator).ok_or(Error::OperatorNotFound)?;
+
+        // Transfer funds from financier to operator's payout address to finance solar inventory
+        let client = TokenClient::new(&e, &pool.token);
+        client.transfer(&financier, &op.payout_address, &amount);
+
+        // Update or create financier position
+        let mut pos = storage::get_pool_financier(&e, pool_id, &financier).unwrap_or(PoolFinancier {
+            pool_id,
+            financier: financier.clone(),
+            deposit_amount: 0,
+            reward_debt: 0,
+            claimed_amount: 0,
+        });
+
+        // If there was an existing deposit, calculate accumulated pending rewards
+        if pos.deposit_amount > 0 {
+            let accumulated = (pos.deposit_amount * pool.acc_reward_per_share) / ACC_PRECISION;
+            let pending = accumulated - pos.reward_debt;
+            if pending > 0 {
+                // Pending earnings remain claimable
+                pos.claimed_amount -= pending; // Equivalent to adding to claimable ledger
+            }
+        }
+
+        pos.deposit_amount += amount;
+        pos.reward_debt = (pos.deposit_amount * pool.acc_reward_per_share) / ACC_PRECISION;
+        storage::set_pool_financier(&e, &pos);
+
+        pool.funded_amount += amount;
+        if pool.funded_amount == pool.target_amount {
+            pool.is_closed = true;
+        }
+        storage::set_pool(&e, &pool);
+
+        events::emit_pool_funded(&e, pool_id, financier, amount, pool.funded_amount);
+        Ok(())
+    }
+
+    pub fn get_pool(e: Env, pool_id: u64) -> Result<FinancierPool, Error> {
+        storage::get_pool(&e, pool_id).ok_or(Error::PoolNotFound)
+    }
+
+    pub fn get_pool_financier(e: Env, pool_id: u64, financier: Address) -> Result<PoolFinancier, Error> {
+        storage::get_pool_financier(&e, pool_id, &financier).ok_or(Error::Unauthorized)
     }
 
     pub fn version(_e: Env) -> u32 {
