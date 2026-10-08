@@ -104,3 +104,42 @@ pub struct PoolFinancier {
     pub reward_debt: i128,
     pub claimed_amount: i128,
 }
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum AccessState {
+    Active = 1,
+    GracePeriod = 2,
+    Locked = 3,
+    Owned = 4,
+    Suspended = 5,
+    Repossessed = 6,
+    Paused = 7,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessStatus {
+    pub lease_id: u64,
+    pub state: AccessState,
+    pub is_unlocked: bool,
+    pub paid_until: u64,
+    pub current_time: u64,
+    pub seconds_remaining: u64,
+    pub days_remaining: u32,
+    pub total_paid: i128,
+    pub total_price: i128,
+    pub remaining_to_own: i128,
+    pub is_repossessable: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchLeaseInput {
+    pub lease_id: u64,
+    pub customer: Address,
+    pub plan_id: u32,
+    pub device_id: BytesN<32>,
+    pub pool_id: Option<u64>,
+}
