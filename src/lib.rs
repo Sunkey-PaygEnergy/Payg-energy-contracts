@@ -494,6 +494,99 @@ impl SunkeyPaygContract {
         Ok(count)
     }
 
+    pub fn pay(e: Env, payer: Address, lease_id: u64, amount: i128) -> Result<i128, Error> {
+        payer.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        let plan = storage::get_plan(&e, lease.plan_id).ok_or(Error::PlanNotFound)?;
+        let mut op = storage::get_operator(&e, &lease.operator).ok_or(Error::OperatorNotFound)?;
+
+        if lease.status == LeaseStatus::Owned {
+            return Err(Error::LeaseAlreadyOwned);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+        if lease.status == LeaseStatus::Suspended {
+            return Err(Error::LeaseSuspended);
+        }
+
+        let remaining_to_own = plan.total_price - lease.total_paid;
+        if remaining_to_own <= 0 {
+            return Err(Error::LeaseAlreadyOwned);
+        }
+
+        // Overpayment capping: charge at most remaining_to_own
+        let actual_payment = if amount > remaining_to_own {
+            remaining_to_own
+        } else {
+            amount
+        };
+
+        if actual_payment < plan.min_payment && actual_payment < remaining_to_own {
+            return Err(Error::BelowMinimumPayment);
+        }
+
+        let mut pool_opt = lease.pool_id.and_then(|pid| storage::get_pool(&e, pid));
+
+        let (op_share, pool_share) = Self::internal_split_and_transfer(
+            &e,
+            &payer,
+            &plan.token,
+            actual_payment,
+            &op,
+            &mut pool_opt,
+        );
+
+        if let Some(ref p) = pool_opt {
+            storage::set_pool(&e, p);
+        }
+
+        op.total_volume_collected += op_share;
+        storage::set_operator(&e, &op);
+
+        let current_time = e.ledger().timestamp();
+        let seconds_added = ((actual_payment * (SECONDS_PER_DAY as i128)) / plan.daily_rate) as u64;
+
+        let base_time = if lease.paid_until > current_time {
+            lease.paid_until
+        } else {
+            current_time
+        };
+
+        lease.paid_until = base_time + seconds_added;
+        lease.total_paid += actual_payment;
+        lease.last_payment_at = current_time;
+
+        let is_owned = lease.total_paid >= plan.total_price;
+        if is_owned {
+            lease.status = LeaseStatus::Owned;
+        }
+
+        storage::set_lease(&e, &lease);
+
+        events::emit_payment(
+            &e,
+            lease_id,
+            payer,
+            actual_payment,
+            lease.paid_until,
+            lease.total_paid,
+            op_share,
+            pool_share,
+        );
+
+        if is_owned {
+            events::emit_owned(&e, lease_id, lease.customer.clone(), lease.total_paid);
+        }
+
+        Ok(actual_payment)
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
