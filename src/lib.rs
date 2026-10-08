@@ -1,9 +1,11 @@
 #![no_std]
 
 pub mod errors;
+pub mod types;
 
 use soroban_sdk::{contract, contractimpl, Env};
 pub use errors::Error;
+pub use types::*;
 
 #[contract]
 pub struct SunkeyPaygContract;
