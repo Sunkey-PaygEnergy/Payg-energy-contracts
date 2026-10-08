@@ -2,7 +2,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Ledger as _},
     token::{Client as TokenClient, StellarAssetClient},
     Address, BytesN, Env, String, Vec,
 };
@@ -463,4 +463,224 @@ fn test_financier_pool_and_pro_rata_splits() {
     // Second claim without new payments fails
     let res_no_earn = client.try_claim_pool_earnings(&financier_a, &pool_id);
     assert_eq!(res_no_earn.unwrap_err().unwrap(), Error::NoEarningsToClaim);
+}
+
+#[test]
+fn test_emergency_pause_and_preservation() {
+    let (e, client, _admin) = setup_env();
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let token = Address::generate(&e);
+    let plan_id = 99;
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Test Plan"),
+        &token,
+        &1_000_000,
+        &10_000_000,
+        &0,
+        &1_000_000,
+        &86_400,
+    );
+
+    let customer = Address::generate(&e);
+    let device_id = BytesN::from_array(&e, &[11u8; 32]);
+    let lease_id = 7001;
+    client.create_lease(&operator, &lease_id, &customer, &plan_id, &device_id, &None);
+
+    let current_time = e.ledger().timestamp();
+    // Emergency pause for 10 days (864,000s)
+    let pause_seconds = 864_000;
+    let paused_until = client.emergency_pause(
+        &operator,
+        &lease_id,
+        &pause_seconds,
+        &String::from_str(&e, "Severe flooding flood relief"),
+    );
+
+    assert_eq!(paused_until, current_time + pause_seconds);
+    let lease = client.get_lease(&lease_id);
+    assert_eq!(lease.emergency_paused_until, paused_until);
+
+    // Device remains active/unlocked during emergency pause
+    assert!(client.is_active(&lease_id));
+    let access = client.get_access(&lease_id);
+    assert!(access.is_unlocked);
+}
+
+#[test]
+fn test_plan_change_flow() {
+    let (e, client, _admin) = setup_env();
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let token = Address::generate(&e);
+    let plan1 = 1;
+    let plan2 = 2;
+
+    client.create_plan(
+        &operator,
+        &plan1,
+        &String::from_str(&e, "Basic 20W"),
+        &token,
+        &1_000_000,
+        &100_000_000,
+        &0,
+        &1_000_000,
+        &86_400,
+    );
+    client.create_plan(
+        &operator,
+        &plan2,
+        &String::from_str(&e, "Upgraded 50W"),
+        &token,
+        &2_000_000,
+        &200_000_000,
+        &0,
+        &2_000_000,
+        &86_400,
+    );
+
+    let customer = Address::generate(&e);
+    let device_id = BytesN::from_array(&e, &[12u8; 32]);
+    let lease_id = 7002;
+    client.create_lease(&operator, &lease_id, &customer, &plan1, &device_id, &None);
+
+    // Operator requests plan change
+    client.request_plan_change(&operator, &lease_id, &plan2);
+    assert_eq!(client.get_pending_plan_change(&lease_id), plan2);
+
+    // Unauthorized non-customer fails
+    let random_user = Address::generate(&e);
+    let res_unauth = client.try_accept_plan_change(&random_user, &lease_id);
+    assert_eq!(res_unauth.unwrap_err().unwrap(), Error::Unauthorized);
+
+    // Customer accepts
+    client.accept_plan_change(&customer, &lease_id);
+    let updated_lease = client.get_lease(&lease_id);
+    assert_eq!(updated_lease.plan_id, plan2);
+    assert!(client.try_get_pending_plan_change(&lease_id).is_err());
+}
+
+#[test]
+fn test_swap_and_transfer() {
+    let (e, client, _admin) = setup_env();
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let token = Address::generate(&e);
+    let plan_id = 3;
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Standard"),
+        &token,
+        &1_000_000,
+        &100_000_000,
+        &0,
+        &1_000_000,
+        &86_400,
+    );
+
+    let customer_a = Address::generate(&e);
+    let customer_b = Address::generate(&e);
+    let dev1 = BytesN::from_array(&e, &[13u8; 32]);
+    let dev2 = BytesN::from_array(&e, &[14u8; 32]);
+    let lease_id = 7003;
+
+    client.create_lease(&operator, &lease_id, &customer_a, &plan_id, &dev1, &None);
+
+    // Operator swaps hardware device to dev2
+    client.device_swap(
+        &operator,
+        &lease_id,
+        &dev2,
+        &String::from_str(&e, "Panel upgrade maintenance"),
+    );
+
+    assert!(!client.is_device_assigned(&dev1)); // old freed
+    assert!(client.is_device_assigned(&dev2));  // new assigned
+    assert_eq!(client.get_lease(&lease_id).device_id, dev2);
+
+    // Customer transfers lease to customer_b
+    client.transfer_lease_customer(&customer_a, &customer_b, &lease_id);
+    assert_eq!(client.get_lease(&lease_id).customer, customer_b);
+}
+
+#[test]
+fn test_repossession_guard_rails() {
+    let (e, client, _admin) = setup_env();
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let token = Address::generate(&e);
+    let plan_id = 4;
+    let grace_period = 86_400; // 1 day grace
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Rigid Lease"),
+        &token,
+        &1_000_000,
+        &50_000_000,
+        &0,
+        &1_000_000,
+        &grace_period,
+    );
+
+    let customer = Address::generate(&e);
+    let device_id = BytesN::from_array(&e, &[15u8; 32]);
+    let lease_id = 7004;
+
+    client.create_lease(&operator, &lease_id, &customer, &plan_id, &device_id, &None);
+
+    // Grant 2 days of credit
+    client.grant_credit(
+        &operator,
+        &lease_id,
+        &2,
+        &String::from_str(&e, "Initial credit"),
+    );
+
+    let t0 = e.ledger().timestamp();
+
+    // Case 1: Attempt repossession while paid_until > current_time
+    let res_active = client.try_repossess(&operator, &lease_id, &String::from_str(&e, "premature repo"));
+    assert_eq!(res_active.unwrap_err().unwrap(), Error::RepossessionNotAllowed);
+
+    // Advance time past paid_until (2 days) + 12 hours (within 1 day grace period)
+    e.ledger().set_timestamp(t0 + (2 * 86_400) + 43_200);
+
+    // Access status shows GracePeriod
+    let access = client.get_access(&lease_id);
+    assert_eq!(access.state, AccessState::GracePeriod);
+    assert!(!access.is_repossessable);
+
+    // Case 2: Attempt repossession during active grace period
+    let res_grace = client.try_repossess(&operator, &lease_id, &String::from_str(&e, "repo in grace"));
+    assert_eq!(res_grace.unwrap_err().unwrap(), Error::GracePeriodActive);
+
+    // Advance time past grace period (past default deadline)
+    e.ledger().set_timestamp(t0 + (2 * 86_400) + grace_period + 10);
+
+    let access_locked = client.get_access(&lease_id);
+    assert_eq!(access_locked.state, AccessState::Locked);
+    assert!(access_locked.is_repossessable);
+
+    // Case 3: Repossession now allowed!
+    client.repossess(&operator, &lease_id, &String::from_str(&e, "Defaulted beyond grace"));
+
+    let lease_repo = client.get_lease(&lease_id);
+    assert_eq!(lease_repo.status, LeaseStatus::Repossessed);
+    assert!(!client.is_device_assigned(&device_id)); // device recovered
 }
