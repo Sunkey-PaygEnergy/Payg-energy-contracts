@@ -6,3 +6,4 @@ node_modules/
 dist/
 .stellar/
 deployments/testnet.local.json
+test_snapshots/

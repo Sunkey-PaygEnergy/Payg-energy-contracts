@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, String};
 
 pub fn emit_operator_registered(e: &Env, operator: Address, payout: Address, name: String) {
     let topics = (symbol_short!("op_reg"), operator);
