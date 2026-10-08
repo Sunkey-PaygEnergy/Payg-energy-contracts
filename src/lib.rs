@@ -705,6 +705,38 @@ impl SunkeyPaygContract {
         storage::get_pending_plan_change(&e, lease_id).ok_or(Error::NoPendingPlanChange)
     }
 
+    pub fn device_swap(
+        e: Env,
+        operator: Address,
+        lease_id: u64,
+        new_device_id: BytesN<32>,
+        reason: String,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        if lease.operator != operator {
+            return Err(Error::Unauthorized);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+
+        if storage::get_device_lease(&e, &new_device_id).is_some() {
+            return Err(Error::DeviceAlreadyAssigned);
+        }
+
+        let old_device = lease.device_id.clone();
+        storage::remove_device_lease(&e, &old_device);
+        storage::set_device_lease(&e, &new_device_id, lease_id);
+
+        lease.device_id = new_device_id.clone();
+        storage::set_lease(&e, &lease);
+
+        events::emit_device_swapped(&e, lease_id, operator, old_device, new_device_id, reason);
+        Ok(())
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
