@@ -1,0 +1,10 @@
+{
+  "network": "testnet",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "contractAlias": "sunkey",
+  "contractId": "CDNL3X754Y66E7Q6BIPX7Z54K3KODV22FGB7N24X2NPL63K4O5GDFZ4N",
+  "adminAddress": "GA5ZSEJYBXZ5Y67657XQ4K5LODV22FGB7N24X2NPL63K4O5GDFZ4NADMIN",
+  "nativeTokenContractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "deployedAt": "2026-10-08T12:00:00Z"
+}
