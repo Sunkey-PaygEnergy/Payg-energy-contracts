@@ -136,3 +136,101 @@ fn test_plan_lifecycle() {
     client.set_plan_active(&operator, &plan_id, &true);
     assert!(client.get_plan(&plan_id).active);
 }
+
+#[test]
+fn test_lease_creation_and_access() {
+    let (e, client, _admin) = setup_env();
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let token = Address::generate(&e);
+    let plan_id = 1;
+    // Plan with 0 deposit
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Zero Deposit Kit"),
+        &token,
+        &2_000_000,
+        &400_000_000,
+        &0,
+        &2_000_000,
+        &86_400, // 1 day grace
+    );
+
+    let customer = Address::generate(&e);
+    let device_id = BytesN::from_array(&e, &[1u8; 32]);
+    let lease_id = 1001;
+
+    client.create_lease(&operator, &lease_id, &customer, &plan_id, &device_id, &None);
+
+    let lease = client.get_lease(&lease_id);
+    assert_eq!(lease.customer, customer);
+    assert_eq!(lease.status, LeaseStatus::Active);
+    assert_eq!(lease.total_paid, 0);
+    assert!(client.is_device_assigned(&device_id));
+    assert_eq!(client.get_device_lease(&device_id), lease_id);
+
+    // Duplicate device fails
+    let res_dup_device = client.try_create_lease(&operator, &1002, &customer, &plan_id, &device_id, &None);
+    assert_eq!(res_dup_device.unwrap_err().unwrap(), Error::DeviceAlreadyAssigned);
+
+    // Access check: at current timestamp
+    let access = client.get_access(&lease_id);
+    assert_eq!(access.lease_id, lease_id);
+    assert_eq!(access.state, AccessState::Active);
+    assert!(access.is_unlocked);
+    assert_eq!(access.remaining_to_own, 400_000_000);
+}
+
+#[test]
+fn test_batch_lease_creation() {
+    let (e, client, _admin) = setup_env();
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let token = Address::generate(&e);
+    let plan_id = 2;
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Community Plan"),
+        &token,
+        &1_000_000,
+        &100_000_000,
+        &0,
+        &1_000_000,
+        &86_400,
+    );
+
+    let mut batch = Vec::new(&e);
+    for i in 1..=5 {
+        let mut dev_bytes = [0u8; 32];
+        dev_bytes[0] = i as u8;
+        let device_id = BytesN::from_array(&e, &dev_bytes);
+        batch.push_back(BatchLeaseInput {
+            lease_id: 2000 + i as u64,
+            customer: Address::generate(&e),
+            plan_id,
+            device_id,
+            pool_id: None,
+        });
+    }
+
+    let created_count = client.batch_create_leases(&operator, &batch);
+    assert_eq!(created_count, 5);
+    assert_eq!(client.get_operator(&operator).total_leases, 5);
+
+    for i in 1..=5 {
+        let mut dev_bytes = [0u8; 32];
+        dev_bytes[0] = i as u8;
+        let device_id = BytesN::from_array(&e, &dev_bytes);
+        assert!(client.is_device_assigned(&device_id));
+        let l = client.get_lease(&(2000 + i as u64));
+        assert_eq!(l.status, LeaseStatus::Active);
+    }
+}
