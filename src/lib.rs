@@ -225,18 +225,8 @@ impl SunkeyPaygContract {
             claimed_amount: 0,
         });
 
-        // If there was an existing deposit, calculate accumulated pending rewards
-        if pos.deposit_amount > 0 {
-            let accumulated = (pos.deposit_amount * pool.acc_reward_per_share) / ACC_PRECISION;
-            let pending = accumulated - pos.reward_debt;
-            if pending > 0 {
-                // Pending earnings remain claimable
-                pos.claimed_amount -= pending; // Equivalent to adding to claimable ledger
-            }
-        }
-
         pos.deposit_amount += amount;
-        pos.reward_debt = (pos.deposit_amount * pool.acc_reward_per_share) / ACC_PRECISION;
+        pos.reward_debt += (amount * pool.acc_reward_per_share) / ACC_PRECISION;
         storage::set_pool_financier(&e, &pos);
 
         pool.funded_amount += amount;
@@ -247,6 +237,43 @@ impl SunkeyPaygContract {
 
         events::emit_pool_funded(&e, pool_id, financier, amount, pool.funded_amount);
         Ok(())
+    }
+
+    pub fn claim_pool_earnings(e: Env, financier: Address, pool_id: u64) -> Result<i128, Error> {
+        financier.require_auth();
+
+        let pool = storage::get_pool(&e, pool_id).ok_or(Error::PoolNotFound)?;
+        let mut pos = storage::get_pool_financier(&e, pool_id, &financier).ok_or(Error::Unauthorized)?;
+
+        let accumulated = (pos.deposit_amount * pool.acc_reward_per_share) / ACC_PRECISION;
+        let claimable = accumulated - pos.reward_debt;
+        if claimable <= 0 {
+            return Err(Error::NoEarningsToClaim);
+        }
+
+        // Transfer claimable yield from contract reserve to financier
+        let client = TokenClient::new(&e, &pool.token);
+        client.transfer(&e.current_contract_address(), &financier, &claimable);
+
+        pos.reward_debt = accumulated;
+        pos.claimed_amount += claimable;
+        storage::set_pool_financier(&e, &pos);
+
+        events::emit_pool_claimed(&e, pool_id, financier, claimable);
+        Ok(claimable)
+    }
+
+    pub fn get_claimable_pool_earnings(e: Env, pool_id: u64, financier: Address) -> Result<i128, Error> {
+        let pool = storage::get_pool(&e, pool_id).ok_or(Error::PoolNotFound)?;
+        let pos = storage::get_pool_financier(&e, pool_id, &financier).ok_or(Error::Unauthorized)?;
+
+        let accumulated = (pos.deposit_amount * pool.acc_reward_per_share) / ACC_PRECISION;
+        let claimable = accumulated - pos.reward_debt;
+        if claimable > 0 {
+            Ok(claimable)
+        } else {
+            Ok(0)
+        }
     }
 
     pub fn get_pool(e: Env, pool_id: u64) -> Result<FinancierPool, Error> {
