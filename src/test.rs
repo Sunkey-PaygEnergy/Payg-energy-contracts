@@ -368,3 +368,99 @@ fn test_grant_credit() {
     assert_eq!(access.state, AccessState::Active);
     assert!(access.is_unlocked);
 }
+
+#[test]
+fn test_financier_pool_and_pro_rata_splits() {
+    let (e, client, admin) = setup_env();
+
+    let (token, token_client, asset_client) = create_token(&e, &admin);
+
+    let operator = Address::generate(&e);
+    let payout = Address::generate(&e);
+    client.register_operator(&operator, &String::from_str(&e, "SolarCorp"), &payout);
+
+    let pool_id = 501;
+    let target_amount = 10_000_000; // 10 token target
+    let repayment_bps = 7_000;       // 70% of lease payments
+
+    // Operator creates financier pool
+    client.create_pool(
+        &operator,
+        &pool_id,
+        &token,
+        &String::from_str(&e, "Solar Batch Alpha Pool"),
+        &target_amount,
+        &repayment_bps,
+    );
+
+    let financier_a = Address::generate(&e);
+    let financier_b = Address::generate(&e);
+
+    asset_client.mint(&financier_a, &100_000_000);
+    asset_client.mint(&financier_b, &100_000_000);
+
+    // Financier A deposits 6,000,000 (60%)
+    client.fund_pool(&financier_a, &pool_id, &6_000_000);
+    // Financier B deposits 4,000,000 (40%)
+    client.fund_pool(&financier_b, &pool_id, &4_000_000);
+
+    let pool = client.get_pool(&pool_id);
+    assert_eq!(pool.funded_amount, 10_000_000);
+    assert!(pool.is_closed); // target reached
+
+    // Target exceeded should fail
+    let res_exceed = client.try_fund_pool(&financier_a, &pool_id, &1_000_000);
+    assert!(res_exceed.is_err());
+
+    // Create plan linked to pool
+    let plan_id = 50;
+    client.create_plan(
+        &operator,
+        &plan_id,
+        &String::from_str(&e, "Pooled Solar Kit"),
+        &token,
+        &5_000_000,
+        &50_000_000,
+        &0,
+        &1_000_000,
+        &86_400,
+    );
+
+    let customer = Address::generate(&e);
+    asset_client.mint(&customer, &100_000_000);
+
+    let lease_id = 5555;
+    let device_id = BytesN::from_array(&e, &[9u8; 32]);
+    client.create_lease(&operator, &lease_id, &customer, &plan_id, &device_id, &Some(pool_id));
+
+    // Customer makes payment of 1,000,000
+    // 70% = 700,000 goes to pool!
+    // 30% = 300,000 goes to operator payout!
+    let op_bal_before = token_client.balance(&payout);
+    client.pay(&customer, &lease_id, &1_000_000);
+    let op_bal_after = token_client.balance(&payout);
+    assert_eq!(op_bal_after - op_bal_before, 300_000);
+
+    // Check claimable earnings:
+    // Financier A has 60% of 700,000 = 420,000
+    // Financier B has 40% of 700,000 = 280,000
+    let claimable_a = client.get_claimable_pool_earnings(&pool_id, &financier_a);
+    let claimable_b = client.get_claimable_pool_earnings(&pool_id, &financier_b);
+    assert_eq!(claimable_a, 420_000);
+    assert_eq!(claimable_b, 280_000);
+
+    // Financiers claim earnings
+    let fa_bal_before = token_client.balance(&financier_a);
+    let claimed_a = client.claim_pool_earnings(&financier_a, &pool_id);
+    assert_eq!(claimed_a, 420_000);
+    assert_eq!(token_client.balance(&financier_a) - fa_bal_before, 420_000);
+
+    let fb_bal_before = token_client.balance(&financier_b);
+    let claimed_b = client.claim_pool_earnings(&financier_b, &pool_id);
+    assert_eq!(claimed_b, 280_000);
+    assert_eq!(token_client.balance(&financier_b) - fb_bal_before, 280_000);
+
+    // Second claim without new payments fails
+    let res_no_earn = client.try_claim_pool_earnings(&financier_a, &pool_id);
+    assert_eq!(res_no_earn.unwrap_err().unwrap(), Error::NoEarningsToClaim);
+}
