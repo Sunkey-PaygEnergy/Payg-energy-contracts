@@ -880,6 +880,92 @@ impl SunkeyPaygContract {
         Ok(())
     }
 
+    pub fn is_active(e: Env, lease_id: u64) -> bool {
+        let lease = match storage::get_lease(&e, lease_id) {
+            Some(l) => l,
+            None => return false,
+        };
+
+        if lease.status == LeaseStatus::Owned {
+            return true;
+        }
+        if lease.status == LeaseStatus::Suspended || lease.status == LeaseStatus::Repossessed {
+            return false;
+        }
+
+        let current_time = e.ledger().timestamp();
+        if current_time < lease.emergency_paused_until {
+            return true;
+        }
+
+        current_time <= lease.paid_until
+    }
+
+    pub fn get_access(e: Env, lease_id: u64) -> Result<AccessStatus, Error> {
+        let lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        let plan = storage::get_plan(&e, lease.plan_id).ok_or(Error::PlanNotFound)?;
+
+        let current_time = e.ledger().timestamp();
+        let is_owned = lease.status == LeaseStatus::Owned;
+        let is_repossessed = lease.status == LeaseStatus::Repossessed;
+        let is_suspended = lease.status == LeaseStatus::Suspended;
+        let is_paused = current_time < lease.emergency_paused_until;
+
+        let state = if is_owned {
+            AccessState::Owned
+        } else if is_repossessed {
+            AccessState::Repossessed
+        } else if is_suspended {
+            AccessState::Suspended
+        } else if is_paused {
+            AccessState::Paused
+        } else if current_time <= lease.paid_until {
+            AccessState::Active
+        } else if current_time <= lease.paid_until.saturating_add(plan.grace_period_seconds) {
+            AccessState::GracePeriod
+        } else {
+            AccessState::Locked
+        };
+
+        let is_unlocked = matches!(state, AccessState::Active | AccessState::Owned | AccessState::Paused);
+
+        let seconds_remaining = if is_owned {
+            u64::MAX
+        } else if lease.paid_until > current_time {
+            lease.paid_until - current_time
+        } else {
+            0
+        };
+
+        let days_remaining = if is_owned {
+            u32::MAX
+        } else {
+            (seconds_remaining / SECONDS_PER_DAY) as u32
+        };
+
+        let remaining_to_own = if is_owned {
+            0
+        } else {
+            core::cmp::max(0, plan.total_price - lease.total_paid)
+        };
+
+        let is_repossessable = state == AccessState::Locked && !is_owned && !is_repossessed;
+
+        Ok(AccessStatus {
+            lease_id,
+            state,
+            is_unlocked,
+            paid_until: lease.paid_until,
+            current_time,
+            seconds_remaining,
+            days_remaining,
+            total_paid: lease.total_paid,
+            total_price: plan.total_price,
+            remaining_to_own,
+            is_repossessable,
+        })
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
