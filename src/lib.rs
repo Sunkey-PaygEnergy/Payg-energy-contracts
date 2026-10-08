@@ -832,6 +832,54 @@ impl SunkeyPaygContract {
         Ok(())
     }
 
+    pub fn repossess(
+        e: Env,
+        operator: Address,
+        lease_id: u64,
+        reason: String,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let mut lease = storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)?;
+        let plan = storage::get_plan(&e, lease.plan_id).ok_or(Error::PlanNotFound)?;
+
+        if lease.operator != operator {
+            return Err(Error::Unauthorized);
+        }
+        if lease.status == LeaseStatus::Owned {
+            return Err(Error::LeaseAlreadyOwned);
+        }
+        if lease.status == LeaseStatus::Repossessed {
+            return Err(Error::LeaseRepossessed);
+        }
+
+        let current_time = e.ledger().timestamp();
+
+        // Check if customer is currently active
+        if current_time < lease.paid_until {
+            return Err(Error::RepossessionNotAllowed);
+        }
+
+        // Check if under emergency pause
+        if current_time < lease.emergency_paused_until {
+            return Err(Error::RepossessionNotAllowed);
+        }
+
+        // Check grace period guard: must have expired past paid_until + grace_period_seconds
+        let default_deadline = lease.paid_until.saturating_add(plan.grace_period_seconds);
+        if current_time <= default_deadline {
+            return Err(Error::GracePeriodActive);
+        }
+
+        // Repossess: release device assignment from active fleet and mark status
+        storage::remove_device_lease(&e, &lease.device_id);
+        lease.status = LeaseStatus::Repossessed;
+        storage::set_lease(&e, &lease);
+
+        events::emit_repossessed(&e, lease_id, operator, reason);
+        Ok(())
+    }
+
     pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
