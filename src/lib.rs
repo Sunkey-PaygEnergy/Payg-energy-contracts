@@ -28,14 +28,25 @@ impl SunkeyPaygContract {
         let mut op_share: i128 = amount;
 
         if let Some(pool) = pool_opt {
-            if pool.funded_amount > 0 && pool.repayment_bps > 0 {
-                pool_share = (amount * (pool.repayment_bps as i128)) / (BPS_DENOMINATOR as i128);
+            if pool.funded_amount > 0 && pool.repayment_bps > 0 && pool.total_repaid < pool.target_amount {
+                let remaining_target = pool.target_amount - pool.total_repaid;
+                let calculated_pool_share = (amount * (pool.repayment_bps as i128)) / (BPS_DENOMINATOR as i128);
+                pool_share = if calculated_pool_share > remaining_target {
+                    remaining_target
+                } else {
+                    calculated_pool_share
+                };
+
                 if pool_share > 0 {
                     op_share = amount - pool_share;
                     client.transfer(payer, &e.current_contract_address(), &pool_share);
                     let reward_inc = (pool_share * ACC_PRECISION) / pool.funded_amount;
                     pool.acc_reward_per_share += reward_inc;
                     pool.total_repaid += pool_share;
+
+                    if pool.total_repaid >= pool.target_amount {
+                        pool.is_closed = true;
+                    }
                 }
             }
         }
