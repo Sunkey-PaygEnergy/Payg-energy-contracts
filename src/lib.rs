@@ -5,12 +5,46 @@ pub mod events;
 pub mod storage;
 pub mod types;
 
-use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, BytesN, Env, String};
 pub use errors::Error;
 pub use types::*;
 
 #[contract]
 pub struct SunkeyPaygContract;
+
+impl SunkeyPaygContract {
+    fn internal_split_and_transfer(
+        e: &Env,
+        payer: &Address,
+        token: &Address,
+        amount: i128,
+        operator: &Operator,
+        pool_opt: &mut Option<FinancierPool>,
+    ) -> (i128, i128) {
+        let client = TokenClient::new(e, token);
+        let mut pool_share: i128 = 0;
+        let mut op_share: i128 = amount;
+
+        if let Some(pool) = pool_opt {
+            if pool.funded_amount > 0 && pool.repayment_bps > 0 {
+                pool_share = (amount * (pool.repayment_bps as i128)) / (BPS_DENOMINATOR as i128);
+                if pool_share > 0 {
+                    op_share = amount - pool_share;
+                    client.transfer(payer, &e.current_contract_address(), &pool_share);
+                    let reward_inc = (pool_share * ACC_PRECISION) / pool.funded_amount;
+                    pool.acc_reward_per_share += reward_inc;
+                    pool.total_repaid += pool_share;
+                }
+            }
+        }
+
+        if op_share > 0 {
+            client.transfer(payer, &operator.payout_address, &op_share);
+        }
+
+        (op_share, pool_share)
+    }
+}
 
 #[contractimpl]
 impl SunkeyPaygContract {
@@ -212,11 +246,9 @@ impl SunkeyPaygContract {
 
         let op = storage::get_operator(&e, &pool.operator).ok_or(Error::OperatorNotFound)?;
 
-        // Transfer funds from financier to operator's payout address to finance solar inventory
         let client = TokenClient::new(&e, &pool.token);
         client.transfer(&financier, &op.payout_address, &amount);
 
-        // Update or create financier position
         let mut pos = storage::get_pool_financier(&e, pool_id, &financier).unwrap_or(PoolFinancier {
             pool_id,
             financier: financier.clone(),
@@ -251,7 +283,6 @@ impl SunkeyPaygContract {
             return Err(Error::NoEarningsToClaim);
         }
 
-        // Transfer claimable yield from contract reserve to financier
         let client = TokenClient::new(&e, &pool.token);
         client.transfer(&e.current_contract_address(), &financier, &claimable);
 
@@ -282,6 +313,121 @@ impl SunkeyPaygContract {
 
     pub fn get_pool_financier(e: Env, pool_id: u64, financier: Address) -> Result<PoolFinancier, Error> {
         storage::get_pool_financier(&e, pool_id, &financier).ok_or(Error::Unauthorized)
+    }
+
+    pub fn create_lease(
+        e: Env,
+        operator: Address,
+        lease_id: u64,
+        customer: Address,
+        plan_id: u32,
+        device_id: BytesN<32>,
+        pool_id: Option<u64>,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let mut op = storage::get_operator(&e, &operator).ok_or(Error::OperatorNotFound)?;
+        if !op.active {
+            return Err(Error::OperatorInactive);
+        }
+
+        let plan = storage::get_plan(&e, plan_id).ok_or(Error::PlanNotFound)?;
+        if !plan.active || plan.operator != operator {
+            return Err(Error::PlanInactive);
+        }
+
+        if storage::get_lease(&e, lease_id).is_some() {
+            return Err(Error::LeaseAlreadyExists);
+        }
+
+        if storage::get_device_lease(&e, &device_id).is_some() {
+            return Err(Error::DeviceAlreadyAssigned);
+        }
+
+        let mut pool_opt: Option<FinancierPool> = None;
+        if let Some(pid) = pool_id {
+            let pool = storage::get_pool(&e, pid).ok_or(Error::PoolNotFound)?;
+            if pool.operator != operator {
+                return Err(Error::Unauthorized);
+            }
+            pool_opt = Some(pool);
+        }
+
+        let current_time = e.ledger().timestamp();
+        let mut paid_until = current_time;
+        let mut total_paid: i128 = 0;
+
+        if plan.deposit_amount > 0 {
+            // Customer authorizes deposit
+            customer.require_auth();
+            let (op_share, pool_share) = Self::internal_split_and_transfer(
+                &e,
+                &customer,
+                &plan.token,
+                plan.deposit_amount,
+                &op,
+                &mut pool_opt,
+            );
+
+            let deposit_seconds = ((plan.deposit_amount * (SECONDS_PER_DAY as i128)) / plan.daily_rate) as u64;
+            paid_until = current_time + deposit_seconds;
+            total_paid = plan.deposit_amount;
+            op.total_volume_collected += op_share;
+
+            if let Some(ref p) = pool_opt {
+                storage::set_pool(&e, p);
+            }
+
+            events::emit_payment(
+                &e,
+                lease_id,
+                customer.clone(),
+                plan.deposit_amount,
+                paid_until,
+                total_paid,
+                op_share,
+                pool_share,
+            );
+        }
+
+        op.total_leases += 1;
+        storage::set_operator(&e, &op);
+
+        let is_owned = total_paid >= plan.total_price;
+        let status = if is_owned {
+            LeaseStatus::Owned
+        } else {
+            LeaseStatus::Active
+        };
+
+        let lease = Lease {
+            lease_id,
+            operator: operator.clone(),
+            customer: customer.clone(),
+            plan_id,
+            device_id: device_id.clone(),
+            pool_id,
+            status,
+            paid_until,
+            total_paid,
+            emergency_paused_until: 0,
+            created_at: current_time,
+            last_payment_at: current_time,
+        };
+
+        storage::set_lease(&e, &lease);
+        storage::set_device_lease(&e, &device_id, lease_id);
+
+        events::emit_lease_created(&e, lease_id, customer, operator, device_id, pool_id);
+        if is_owned {
+            events::emit_owned(&e, lease_id, lease.customer, total_paid);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_lease(e: Env, lease_id: u64) -> Result<Lease, Error> {
+        storage::get_lease(&e, lease_id).ok_or(Error::LeaseNotFound)
     }
 
     pub fn version(_e: Env) -> u32 {
