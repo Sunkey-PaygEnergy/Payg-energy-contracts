@@ -84,6 +84,72 @@ impl SunkeyPaygContract {
         storage::get_operator(&e, &operator).ok_or(Error::OperatorNotFound)
     }
 
+    pub fn create_plan(
+        e: Env,
+        operator: Address,
+        plan_id: u32,
+        name: String,
+        token: Address,
+        daily_rate: i128,
+        total_price: i128,
+        deposit_amount: i128,
+        min_payment: i128,
+        grace_period_seconds: u64,
+    ) -> Result<(), Error> {
+        operator.require_auth();
+
+        let op = storage::get_operator(&e, &operator).ok_or(Error::OperatorNotFound)?;
+        if !op.active {
+            return Err(Error::OperatorInactive);
+        }
+
+        if daily_rate <= 0 || total_price <= 0 || min_payment <= 0 || deposit_amount < 0 {
+            return Err(Error::InvalidPlanParams);
+        }
+        if min_payment > total_price || deposit_amount > total_price {
+            return Err(Error::InvalidPlanParams);
+        }
+        if storage::get_plan(&e, plan_id).is_some() {
+            return Err(Error::PlanAlreadyExists);
+        }
+
+        let plan = Plan {
+            plan_id,
+            operator: operator.clone(),
+            name,
+            token,
+            daily_rate,
+            total_price,
+            deposit_amount,
+            min_payment,
+            grace_period_seconds,
+            active: true,
+            created_at: e.ledger().timestamp(),
+        };
+
+        storage::set_plan(&e, &plan);
+        events::emit_plan_created(&e, plan_id, operator, daily_rate, total_price);
+        Ok(())
+    }
+
+    pub fn set_plan_active(e: Env, operator: Address, plan_id: u32, active: bool) -> Result<(), Error> {
+        operator.require_auth();
+
+        let mut plan = storage::get_plan(&e, plan_id).ok_or(Error::PlanNotFound)?;
+        if plan.operator != operator {
+            return Err(Error::Unauthorized);
+        }
+
+        plan.active = active;
+        storage::set_plan(&e, &plan);
+        events::emit_plan_status(&e, plan_id, active);
+        Ok(())
+    }
+
+    pub fn get_plan(e: Env, plan_id: u32) -> Result<Plan, Error> {
+        storage::get_plan(&e, plan_id).ok_or(Error::PlanNotFound)
+    }
+
     pub fn version(_e: Env) -> u32 {
         1
     }
